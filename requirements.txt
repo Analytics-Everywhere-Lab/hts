@@ -1,0 +1,11 @@
+langchain
+langgraph
+langchain-google-genai
+langchain-ollama
+chromadb
+pypdf
+sentence-transformers
+duckduckgo-search
+pandas
+beautifulsoup4
+requests

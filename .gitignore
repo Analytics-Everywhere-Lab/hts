@@ -1,0 +1,7 @@
+chroma_db
+.venv
+__pycache__
+.env
+data.csv
+evaluation_results.csv
+tariff.pdf
