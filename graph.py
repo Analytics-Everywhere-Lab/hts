@@ -4,7 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 from typing import TypedDict, List, Any, Dict
 from langgraph.graph import StateGraph, START, END
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -12,9 +12,12 @@ import logging
 import warnings
 
 # Suppress harmless warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
+warnings.filterwarnings("ignore")
 
 class GraphState(TypedDict):
     item_description: str
@@ -26,6 +29,7 @@ class GraphState(TypedDict):
     element_confidences: Dict[str, Any]
     escalation_needed: bool
     escalation_question: str
+    disable_escalation: bool
     llm: Any
 
 def search_node(state: GraphState):
@@ -87,26 +91,28 @@ def decision_node(state: GraphState):
     rag_context = state["rag_context"]
     
     sys_msg = SystemMessage(content="""You are an expert Canadian customs classification agent. 
-Analyze the item description, web search context, and official Canadian Tariff PDF context to determine the 10-digit Canadian HTS code.
-Output your response as STRICT JSON with the following structure:
-{
-  "reasoning": "Step-by-step logic for the classification...",
-  "chapter": "First 2 digits",
-  "heading": "Next 2 digits",
-  "subheading": "Next 2 digits",
-  "additional_subheading": "Next 2 digits",
-  "statistical_suffix": "Last 2 digits"
-}
-Ensure all digits combined make exactly 10 digits. Do not include markdown formatting like ```json. Output ONLY the raw JSON object.
-""")
+    Analyze the item description, web search context, and official Canadian Tariff PDF context to determine the 10-digit Canadian HTS code.
+    Output your response as STRICT JSON with the following structure:
+    {
+    "reasoning": "Step-by-step logic for the classification...",
+    "chapter": "First 2 digits",
+    "heading": "Next 2 digits",
+    "subheading": "Next 2 digits",
+    "additional_subheading": "Next 2 digits",
+    "statistical_suffix": "Last 2 digits"
+    }
+    Ensure all digits combined make exactly 10 digits. Do not include markdown formatting like ```json. Output ONLY the raw JSON object.
+    """)
     user_msg = HumanMessage(content=f"Item Description: {item_desc}\n\nWeb Search Context:\n{search_results}\n\nTariff Context:\n{rag_context}")
     
-    # 3-Ensemble Voting for Self-Consistency
-    # We will simulate perturbations using 3 different variations of the prompt slightly.
+    # 5-Ensemble Voting for Self-Consistency
+    # We will simulate perturbations using 5 different variations of the prompt slightly.
     perturbations = [
         "What is the HTS code for this item?",
         "Carefully re-evaluate the material composition and function. What is the 10-digit HTS code?",
-        "Please provide the most accurate 10-digit Tariff classification based on the provided evidence."
+        "Please provide the most accurate 10-digit Tariff classification based on the provided evidence.",
+        "Considering all the retrieved context and the item's main characteristics, determine its exact 10-digit HTS code.",
+        "Synthesize the search context and tariff information to deduce the most specific 10-digit Canadian HTS classification."
     ]
     
     results_list = []
@@ -125,17 +131,32 @@ Ensure all digits combined make exactly 10 digits. Do not include markdown forma
             # clean json
             start = content.find('{')
             end = content.rfind('}') + 1
-            if start != -1 and end != 0:
-                content = content[start:end]
+            json_str = content[start:end] if start != -1 and end != 0 else content
             
-            data = json.loads(content)
+            data = None
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                try:
+                    import ast
+                    # Fallback for Python dict strings (e.g. single quotes)
+                    data = ast.literal_eval(json_str)
+                except Exception:
+                    try:
+                        # Fallback for minor quote replacement
+                        data = json.loads(json_str.replace("'", '"'))
+                    except Exception:
+                        pass # Parsing completely failed
+                
+            if not isinstance(data, dict):
+                continue # Skip this ensemble run if it didn't produce a dictionary
+                
             if i == 0:
                 first_reasoning = data.get("reasoning", "")
             results_list.append(data)
-        except Exception as e:
-            print(f"Ensemble run {i+1} failed to parse JSON: {e}")
+        except Exception:
+            # Silently pass on this ensemble run if there was an API or severe extraction error
             pass
-            
     # Voting logic
     elements = ["chapter", "heading", "subheading", "additional_subheading", "statistical_suffix"]
     votes = {el: {} for el in elements}
@@ -156,14 +177,14 @@ Ensure all digits combined make exactly 10 digits. Do not include markdown forma
         if not votes[el]:
             # Fallback if all failed
             final_elements[el] = "00"
-            element_confidences[el] = {"value": "00", "confidence": "0% (0/3)", "score": 0.0}
+            element_confidences[el] = {"value": "00", "confidence": "0% (0/5)", "score": 0.0}
             escalation_needed = True
             continue
             
         # Get max voted value
         top_val = max(votes[el], key=votes[el].get)
         vote_count = votes[el][top_val]
-        total_runs = len(results_list) if len(results_list) > 0 else 3
+        total_runs = len(results_list) if len(results_list) > 0 else 5
         confidence_fraction = vote_count / total_runs
         
         final_elements[el] = top_val
@@ -180,7 +201,10 @@ Ensure all digits combined make exactly 10 digits. Do not include markdown forma
     final_hts_code = f"{final_elements['chapter']}{final_elements['heading']}.{final_elements['subheading']}.{final_elements['additional_subheading']}.{final_elements['statistical_suffix']}"
     
     escalation_question = ""
-    if escalation_needed:
+    # Check disable_escalation flag to conditionally override question generation
+    disable_escalation = state.get("disable_escalation", False)
+    
+    if escalation_needed and not disable_escalation:
         # Generate the first escalation question
         esc_sys_msg = SystemMessage(content="You are an expert Canadian customs classification assistant. Our AI ensemble could not confidently classify an item. Given the item context and the elements we are struggling with, ask the user ONE targeted, clarifying question to help determine the correct 10-digit HTS code.")
         esc_user_msg = HumanMessage(content=f"Item: {item_desc}\n\nSearch Context: {search_results}\n\nTariff Context: {rag_context}\n\nCurrent Best Confidences:\n{json.dumps(element_confidences, indent=2)}\n\nWhat ONE question should I ask the user to clarify the classification?")
@@ -203,28 +227,28 @@ def process_escalation_chat(item_desc: str, search_results: str, rag_context: st
     # Chat history is a list of dicts: [{"role": "user"|"assistant", "content": "..."}]
     
     sys_msg = SystemMessage(content="""You are an expert Canadian customs classification agent interacting with a human. 
-Your goal is to determine the 10-digit Canadian HTS code.
-If you are still unsure, ask ONE clarifying question.
-If you are confident you know the 10-digit code, you MUST output a STRICT JSON payload with exactly this structure:
-{
-  "reasoning": "Step-by-step logic",
-  "chapter": "First 2 digits",
-  "heading": "Next 2 digits",
-  "subheading": "Next 2 digits",
-  "additional_subheading": "Next 2 digits",
-  "statistical_suffix": "Last 2 digits",
-  "final_hts_code": "XXXX.XX.XX.XX",
-  "element_confidences": {
-    "chapter": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
-    "heading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
-    "subheading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
-    "additional_subheading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
-    "statistical_suffix": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 }
-  },
-  "is_final": true
-}
-Do NOT output JSON until you are absolutely confident. Otherwise, just output conversational text asking the clarifying question.
-""")
+    Your goal is to determine the 10-digit Canadian HTS code.
+    If you are still unsure, ask ONE clarifying question.
+    If you are confident you know the 10-digit code, you MUST output a STRICT JSON payload with exactly this structure:
+    {
+    "reasoning": "Step-by-step logic",
+    "chapter": "First 2 digits",
+    "heading": "Next 2 digits",
+    "subheading": "Next 2 digits",
+    "additional_subheading": "Next 2 digits",
+    "statistical_suffix": "Last 2 digits",
+    "final_hts_code": "XXXX.XX.XX.XX",
+    "element_confidences": {
+        "chapter": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
+        "heading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
+        "subheading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
+        "additional_subheading": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 },
+        "statistical_suffix": { "value": "XX", "confidence": "100% (Human Verified)", "score": 1.0 }
+    },
+    "is_final": true
+    }
+    Do NOT output JSON until you are absolutely confident. Otherwise, just output conversational text asking the clarifying question.
+    """)
     
     messages = [sys_msg]
     messages.append(HumanMessage(content=f"Initial Item Description: {item_desc}\n\nWeb Search Context:\n{search_results}\n\nTariff Context:\n{rag_context}"))
@@ -259,12 +283,13 @@ Do NOT output JSON until you are absolutely confident. Otherwise, just output co
 
 def build_graph():
     builder = StateGraph(GraphState)
-    builder.add_node("search", search_node)
+    # builder.add_node("search", search_node)
     builder.add_node("rag", rag_node)
     builder.add_node("decision", decision_node)
     
-    builder.add_edge(START, "search")
-    builder.add_edge("search", "rag")
+    # builder.add_edge(START, "search")
+    # builder.add_edge("search", "rag")
+    builder.add_edge(START, "rag")
     builder.add_edge("rag", "decision")
     builder.add_edge("decision", END)
     
@@ -273,8 +298,20 @@ def build_graph():
 # Instantiate the executable graph
 graph = build_graph()
 
-def run_pipeline(item_description: str, llm: Any):
-    initial_state = {"item_description": item_description, "llm": llm, "search_queries": [], "search_results": "", "rag_context": "", "reasoning_steps": "", "final_hts_code": "", "element_confidences": {}, "escalation_needed": False, "escalation_question": ""}
+def run_pipeline(item_description: str, llm: Any, disable_escalation: bool = False):
+    initial_state = {
+        "item_description": item_description, 
+        "llm": llm, 
+        "search_queries": [], 
+        "search_results": "", 
+        "rag_context": "", 
+        "reasoning_steps": "", 
+        "final_hts_code": "", 
+        "element_confidences": {}, 
+        "escalation_needed": False, 
+        "escalation_question": "",
+        "disable_escalation": disable_escalation
+    }
     result = graph.invoke(initial_state)
     return result
 

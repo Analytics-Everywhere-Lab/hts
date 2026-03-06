@@ -5,3 +5,7 @@ __pycache__
 data.csv
 evaluation_results.csv
 tariff.pdf
+Dockerfile
+deploy_to_hf.py
+results.md
+test_data.csv
