@@ -9,3 +9,7 @@ ddgs
 pandas
 beautifulsoup4
 requests
+fastapi
+uvicorn
+python-multipart
+langchain-huggingface

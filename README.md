@@ -1,86 +1,108 @@
 # Multi-Agent Canadian HTS Classification System
 
-This repository contains a multimodal, multi-agent AI pipeline designed to intelligently predict Canadian Harmonized Tariff Schedule (HTS) codes from plain-text item descriptions. The system leverages LangGraph, LangChain, and Chroma vector databases.
+This repository contains a sophisticated, multi-agent AI pipeline designed to intelligently predict Canadian Harmonized Tariff Schedule (HTS) codes from plain-text item descriptions. The system leverages **LangGraph**, **LangChain**, and **Chroma** vector databases to achieve high-accuracy classifications through a combination of live web research, official document retrieval, and self-consistency voting.
 
-There are two LLM pipelines supported out-of-the-box:
-1. **Gemini**: Using Google's `gemini-3.1-flash-lite-preview` via API.
-2. **Ollama**: Using the open-source `qwen3:4b` running locally.
+## 🚀 Key Features
 
-## Architecture
-
-The workflow is orchestrated via **LangGraph** through three core agent nodes:
-
-1. **Search Agent (DuckDuckGo + BeautifulSoup):**
-   - Receives the raw item description.
-   - Leverages an LLM to formulate an optimized search query.
-   - Searches DuckDuckGo for the query.
-   - Scrapes the text from the top web results, returning detailed context (material composition, alternative names, commonly cited HTS codes online).
-2. **RAG Agent (ChromaDB + PyPDF):**
-   - Computes local embeddings using `all-MiniLM-L6-v2`.
-   - Queries a pre-built Chroma vector store populated with extracts from the official Canadian `tariff.pdf` schedule.
-   - Retrieves the top matches based on cosine similarity to the item description.
-3. **Decision Agent (LLM classification):**
-   - Takes the user's item description, the aggregated context from live websites, and the official excerpts from the tariff schedule.
-   - Synthesizes all information to deduce the authoritative 10-digit Canadian HTS code.
+*   **Multi-Agent Orchestration**: Powered by LangGraph for structured, stateful workflows.
+*   **Search Agent**: Real-time web browsing using DuckDuckGo and BeautifulSoup to gather material composition and industry context.
+*   **RAG Agent**: Contextual retrieval from the official 2024 Canadian Tariff Schedule (PDF) via ChromaDB.
+*   **Self-Consistency Voting**: Uses a 3-instance ensemble with prompt perturbations to calculate confidence scores for each digit of the HTS code.
+*   **Human-in-the-Loop Escalation**: Automatically triggers a clarification chat interface if the AI's confidence in any HTS element falls below 60%.
+*   **Modern Web UI**: A glassmorphic, responsive web interface built with FastAPI and Vanilla CSS/JS for real-time interaction and reasoning visualization.
+*   **Model Agnostic**: Supports Google Gemini (Cloud) and Ollama (Local) pipelines.
 
 ---
 
-## Setup & Installation
+## 🏗️ Architecture
 
-### 1. Requirements
+The classification workflow follows a directed acyclic graph (DAG):
 
-Ensure you have Python 3.11+ and a `.venv` (virtual environment) configured.
+1.  **Search Node**: Formulates optimized queries, scrapes results, and extracts relevant technical specifications.
+2.  **RAG Node**: Vectorizes the item description to pull specific legal headings and subheadings from the local 1,500+ page tariff schedule.
+3.  **Decision Node**:
+    *   Synthesizes Web + PDF context.
+    *   Runs 3 independent classification attempts.
+    *   Performs element-wise voting to determine the final 10-digit code (`XXXX.XX.XX.XX`).
+    *   Calculates a confidence score for each segment (Chapter, Heading, Subheading, etc.).
+4.  **Escalation Logic**: If consensus is not reached, it prepares a targeted clarifying question for the user.
+
+---
+
+## 🛠️ Setup & Installation
+
+### 1. Environment Configuration
+
+Ensure you have Python 3.11+ installed. We recommend using a virtual environment.
 
 ```bash
-source .venv/bin/activate
+# Install dependencies
 pip install -r requirements.txt
+# Note: Ensure fastapi, uvicorn, and duckduckgo-search (ddgs) are also installed.
 ```
 
-### 2. Environment Variables
+### 2. API Credentials
 
-Create a `.env` file in the root of the project with your Gemini API Key:
+Create a `.env` file in the root directory:
 
 ```env
-GEMINI_API_KEY=AIzaSyA...
+GEMINI_API_KEY=your_google_ai_studio_api_key
 ```
 
-*(Note: The Ollama pipeline does not require an API key but requires the `ollama` daemon to be active locally).*
+### 3. Data Ingestion (First-Time Only)
 
-### 3. Data Ingestion (VectorDB)
-
-Before running the agents, you must parse your local `tariff.pdf` and build the retrieval database.
+Populate the Chroma vector store with extracts from the official `tariff.pdf`:
 
 ```bash
 python data_ingestion.py
 ```
-*This will create a `chroma_db/` directory containing the vectorized chunks of the document.*
+*This creates the `chroma_db/` directory.*
 
 ---
 
-## Running the Application
+## 🖥️ Usage
 
-### Option A: Interactive Wrappers
+### Option A: The Web Application (Recommended)
 
-Test individual item descriptions iteratively and view the full inner reasoning (search queries, scraped URLs, RAG contexts, and final classification) in your terminal.
+Start the interactive web interface to experience the human-escalation chatbot and visual reasoning chain.
 
-**For Gemini (Cloud):**
 ```bash
-python run_gemini.py
+python app.py
 ```
+Access the UI at: `http://localhost:8001`
 
-**For Ollama (Local):**
-```bash
-# In an external terminal, ensure you have pulled the model and started the server:
-# ollama pull qwen3:4b
-# ollama serve
-python run_ollama.py
-```
+### Option B: Interactive CLI Wrappers
 
-### Option B: Batch Evaluation
+Test individual descriptions and view full internal logs in the terminal.
 
-To iterate over the provided `data.csv` dataset, compare outputs from both pipelines against the `label` targets, and score the accuracy:
+*   **Gemini (Cloud)**: `python run_gemini.py`
+*   **Ollama (Local)**: `python run_ollama.py`
+
+### Option C: Batch Evaluation
+
+Benchmark the system against `data.csv` to calculate accuracy and generate performance reports.
 
 ```bash
 python evaluate.py
 ```
-*This script will write results out to a file named `evaluation_results.csv` logging correctness and generated outputs row-by-row.*
+*Results are saved to `evaluation_results.csv`.*
+
+---
+
+## 📂 Project Structure
+
+| File | Description |
+| :--- | :--- |
+| `app.py` | FastAPI application serving the Web UI and API endpoints. |
+| `graph.py` | Core LangGraph logic, agent node definitions, and escalation chat. |
+| `data_ingestion.py` | PDF parsing and vector database (RAG) initialization. |
+| `evaluate.py` | Metric generation and batch testing script. |
+| `run_*.py` | CLI entry points for specific LLM backends. |
+| `static/` | Frontend assets (HTML/CSS/JS) for the web interface. |
+| `tariff.pdf` | The official reference document for Canadian HTS codes. |
+| `requirements.txt` | Python dependencies. |
+
+---
+
+## ⚖️ License
+This project is intended for research and internal logistical optimization. Always verify final HTS codes with official customs documentation for legal compliance.
