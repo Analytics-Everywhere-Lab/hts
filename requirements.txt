@@ -5,7 +5,7 @@ langchain-ollama
 chromadb
 pypdf
 sentence-transformers
-duckduckgo-search
+ddgs
 pandas
 beautifulsoup4
 requests
